@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import unicodedata
 from datetime import datetime
+import io
 
 st.set_page_config(page_title="Excel → TXT Bolle", page_icon="📦", layout="wide")
 st.title("Excel → TXT (record fissi 128)")
@@ -100,7 +101,6 @@ def convert_excel_to_records(excel_bytes, cod_forn="", cod_cli_ricev=""):
     df = pd.read_excel(xls, sheet_name=sheet)
 
     norm_map = {normcol(c): c for c in df.columns}
-
     col_descr = pick_col(norm_map, ["descrizione", "descrizionearticolo", "desc", "articolo"])
     col_cod   = pick_col(norm_map, ["cod", "codice", "codicearticolo", "codarticolo", "codart"])
     col_qta   = pick_col(norm_map, ["qta", "quantita", "quantitaconsegnata", "quantitaordinata", "qta1", "qta2"])
@@ -134,14 +134,16 @@ def convert_excel_to_records(excel_bytes, cod_forn="", cod_cli_ricev=""):
             current_header = (num_bolla, data_bolla)
 
             fieldsH = [
-                (1,  2, "01"),
-                (3,  5, str(progressivo).zfill(5)),
-                (8,  7, ""), (15, 6, ""),
+                (1, 2, "01"),
+                (3, 5, str(progressivo).zfill(5)),
+                (8, 7, ""),
+                (15, 6, ""),
                 (21, 7, left_pad(num_bolla, 7)),
                 (28, 6, data_bolla),
                 (34,15, left_pad(cod_forn, 15)),
                 (49, 1, " "),
-                (50,15, ""), (65,15, ""),
+                (50,15, ""),
+                (65,15, ""),
                 (80,15, right_pad(cod_cli_ricev, 15)),
                 (95, 1, "1"),
                 (96, 1, " "),
@@ -177,23 +179,23 @@ def convert_excel_to_records(excel_bytes, cod_forn="", cod_cli_ricev=""):
         quantita = qty_10_3(qta_val)
 
         fieldsD = [
-            (1,  2, "02"),
-            (3,  5, str(progressivo).zfill(5)),
+            (1, 2, "02"),
+            (3, 5, str(progressivo).zfill(5)),
             (8, 15, left_pad(codice_art, 15)),
             (23,30, left_pad(descr_pulita, 30)),
             (53, 2, left_pad(um, 2)),
             (55,10, quantita),
-            (65,12, ""),          # Prezzo BLANK
-            (74,12, ""),          # Importo BLANK (start 74)
-            (83, 4, "    "),      # Pezzi BLANK (start 83)
-            (87, 1, ""),          # Ass. IVA BLANK
-            (88, 2, "  "),        # Cod. IVA BLANK
-            (90, 1, ""),          # Tipo movimento BLANK
-            (91, 1, "1"),         # Tipo cessione
-            (92, 5, "00000"),     # Colli
-            (97,12, ""),          # Filler
-            (109,1, ""),          # Tipo resa
-            (110,19, ""),         # Filler finale
+            (65,12, ""),  # Prezzo BLANK
+            (74,12, ""),  # Importo BLANK (start 74)
+            (83, 4, " "), # Pezzi BLANK (start 83)
+            (87, 1, ""),  # Ass. IVA BLANK
+            (88, 2, " "), # Cod. IVA BLANK
+            (90, 1, ""),  # Tipo movimento BLANK
+            (91, 1, "1"), # Tipo cessione
+            (92, 5, "00000"), # Colli
+            (97,12, ""),  # Filler
+            (109,1, ""),  # Tipo resa
+            (110,19, ""), # Filler finale
         ]
         lineD = build_fixed_line(fieldsD, 128)
         if len(lineD) != 128:
@@ -202,12 +204,14 @@ def convert_excel_to_records(excel_bytes, cod_forn="", cod_cli_ricev=""):
 
     if not records:
         raise RuntimeError("Nessun record generato. Controlla intestazioni e colonne.")
+
     return records
 
 # ---------------- UI ----------------
 st.markdown("Carica l’Excel (foglio con intestazioni bolla + righe articolo) e scarica il TXT a 128 caratteri.")
 
 encoding = st.radio("Encoding TXT", ["utf-8", "cp1252"], horizontal=True, index=0)
+
 c1, c2 = st.columns(2)
 with c1:
     cod_forn = st.text_input("Codice fornitore (opzionale, 15 char)", value="")
@@ -216,14 +220,54 @@ with c2:
 
 uploaded = st.file_uploader("Carica Excel (.xlsx / .xls)", type=["xlsx", "xls"])
 
+# Stato per l'anteprima modificabile (inizializzati una volta)
+if "txt_base" not in st.session_state:
+    st.session_state.txt_base = ""
+if "txt_preview" not in st.session_state:
+    st.session_state.txt_preview = ""
+
 if uploaded:
     try:
         records = convert_excel_to_records(uploaded, cod_forn, cod_cli)
         st.success(f"OK ✅ Records generati: {len(records)}")
+
+        # (Facoltativo) Anteprima tecnica delle prime 5 righe non modificabile
         st.code("\n".join(records[:5]), language="text")
+
+        # TESTO FINALE
         txt = "\n".join(records) + "\n"
-        data = txt.encode(encoding, errors="strict")
-        st.download_button("⬇️ Scarica TXT", data=data, file_name="export_bolle.txt", mime="text/plain")
+
+        # Se è cambiato il file/risultato, aggiorna base e anteprima
+        if txt != st.session_state.txt_base:
+            st.session_state.txt_base = txt
+            st.session_state.txt_preview = txt
+
+        # ---- Anteprima MODIFICABILE + Download ----
+        st.subheader("📝 Anteprima TXT (modificabile)")
+        st.caption("Il file scaricato userà esattamente questo contenuto.")
+
+        st.session_state.txt_preview = st.text_area(
+            label="Contenuto TXT",
+            value=st.session_state.txt_preview,
+            height=420,
+            key="txt_preview_area",
+        )
+
+        colA, colB = st.columns([1,1])
+        with colA:
+            if st.button("↩️ Ripristina TXT originale", use_container_width=True):
+                st.session_state.txt_preview = st.session_state.txt_base
+                st.rerun()
+
+        with colB:
+            st.download_button(
+                "⬇️ Scarica TXT",
+                data=st.session_state.txt_preview.encode(encoding, errors="strict"),
+                file_name="export_bolle.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
     except Exception as e:
         st.error(f"Errore: {e}")
 else:
