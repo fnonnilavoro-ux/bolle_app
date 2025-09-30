@@ -201,50 +201,46 @@ def convert_excel_to_records(excel_bytes, cod_forn="", cod_cli_ricev=""):
 
     return records
 
-# ---------- Helper: unica griglia editabile ----------
+# ---------- Griglia unica editabile ----------
+CHAR_COLS = [str(i) for i in range(1, 129)]  # 1..128
+
 def text_to_grid_df(text: str, width: int = 128, show_dots: bool = True) -> pd.DataFrame:
-    """
-    Restituisce un DF con 130 colonne:
-    - TYPE: '01'/'02' (prime 2 colonne del TXT)
-    - ⟂   : marker visivo (█) per evidenziare testate
-    - 1..128: 1 char per cella
-    """
     lines = text.splitlines()
     data = []
     for line in lines:
         padded = (line[:width]).ljust(width)
         rec_type = padded[:2]
-        row = [rec_type, "██" if rec_type == "01" else ""]  # gutter scura per testate
-        for ch in padded:
-            if show_dots and ch == " ":
-                row.append("·")
-            else:
-                row.append(ch)
+        gutter = "██" if rec_type == "01" else ""
+        row = [rec_type, gutter] + [("·" if (show_dots and ch == " ") else ch) for ch in padded]
         data.append(row)
-    cols = ["TYPE", "⟂"] + [str(i) for i in range(1, width + 1)]
-    df = pd.DataFrame(data, columns=cols)
+    df = pd.DataFrame(data, columns=["TYPE", "⟂"] + CHAR_COLS)
     df.index = range(1, len(df) + 1)
     return df
 
 def grid_df_to_text(df: pd.DataFrame, show_dots: bool = True) -> str:
-    """
-    Ricostruisce il TXT da una griglia unica (colonne: TYPE, ⟂, 1..128).
-    Conserva TYPE come primi 2 char della riga (è già presente nelle colonne 1..2).
-    """
     out_lines = []
     for _, row in df.iterrows():
-        # ricostruisci dai char 1..128
         chars = []
-        for i in range(1, 129):
-            c = "" if pd.isna(row[str(i)]) else str(row[str(i)])
-            if c == "":
-                c = " "
-            if show_dots and c == "·":
-                c = " "
-            c = c[0]  # un carattere
-            chars.append(c)
+        for c in CHAR_COLS:
+            ch = row[c]
+            ch = " " if (pd.isna(ch) or ch == "" or (show_dots and ch == "·")) else str(ch)[0]
+            chars.append(ch)
         out_lines.append("".join(chars))
     return "\n".join(out_lines) + "\n"
+
+def toggle_dots_inplace(df: pd.DataFrame, to_show_dots: bool):
+    """Converte SOLO i char columns tra spazio↔︎'·' quando cambi toggle."""
+    if df.empty: 
+        return df
+    if to_show_dots:
+        # spazio -> · (solo celle con esattamente " ")
+        for c in CHAR_COLS:
+            df[c] = df[c].apply(lambda x: "·" if x == " " else x)
+    else:
+        # · -> spazio
+        for c in CHAR_COLS:
+            df[c] = df[c].apply(lambda x: " " if x == "·" else x)
+    return df
 
 # ---------------- Stato ----------------
 if "txt_base" not in st.session_state:      # generato dall'Excel (originale)
@@ -255,12 +251,13 @@ if "grid_df" not in st.session_state:       # griglia unica editabile
     st.session_state.grid_df = pd.DataFrame()
 if "show_dots" not in st.session_state:
     st.session_state.show_dots = True
+if "last_show_dots" not in st.session_state:
+    st.session_state.last_show_dots = True
 if "last_saved_at" not in st.session_state:
     st.session_state.last_saved_at = None
 
 # ---------------- UI ----------------
 st.markdown("Carica l’Excel (foglio con intestazioni bolla + righe articolo).")
-
 encoding = st.radio("Encoding TXT", ["utf-8", "cp1252"], horizontal=True, index=0)
 
 c1, c2, c3 = st.columns([1,1,1])
@@ -275,14 +272,16 @@ with c3:
 b1, b2, b3 = st.columns([1,1,1])
 with b1:
     if st.button("🧹 Reset (nuovo file)", use_container_width=True, type="secondary"):
-        for k in ["txt_base", "txt_saved", "grid_df", "show_dots", "last_saved_at"]:
+        for k in ["txt_base", "txt_saved", "grid_df", "show_dots", "last_show_dots", "last_saved_at"]:
             if k in st.session_state:
                 del st.session_state[k]
-        st.experimental_rerun()
+        st.rerun()  # <- FIX: niente più experimental_rerun
 with b2:
     if st.button("↩️ Ripristina TXT originale", use_container_width=True):
         if st.session_state.txt_base:
             st.session_state.grid_df = text_to_grid_df(st.session_state.txt_base, 128, st.session_state.show_dots)
+            st.session_state.txt_saved = st.session_state.txt_base  # quello che si scarica torna all'originale
+            st.session_state.last_saved_at = None
             st.toast("Anteprima riportata allo stato originale")
 with b3:
     if st.button("💾 Salva modifiche", use_container_width=True):
@@ -294,7 +293,7 @@ with b3:
 
 uploaded = st.file_uploader("Carica Excel (.xlsx / .xls)", type=["xlsx", "xls"])
 
-# CSS: monospace + stringe celle; rafforza marker testate
+# CSS leggero (monospace + celle compatte)
 st.markdown("""
 <style>
 div[data-testid="stDataEditor"] table {
@@ -305,14 +304,10 @@ div[data-testid="stDataEditor"] td, div[data-testid="stDataEditor"] th {
   white-space: pre !important;
   padding: 2px 6px !important;
 }
-/* colonna TYPE e ⟂ più stretta e in grassetto */
-div[data-testid="stDataEditor"] th[colindex="0"],
-div[data-testid="stDataEditor"] th[colindex="1"],
-div[data-testid="stDataEditor"] td[colindex="0"],
-div[data-testid="stDataEditor"] td[colindex="1"] {
-  font-weight: 700;
+div[data-testid="stDataEditor"] td[colindex="1"], 
+div[data-testid="stDataEditor"] th[colindex="1"] {
+  font-weight: 800; /* colonna ⟂ più evidente */
 }
-/* rendi visivamente scura la banda ⟂ quando valorizzata (usa blocchi pieni) */
 </style>
 """, unsafe_allow_html=True)
 
@@ -321,7 +316,7 @@ if uploaded:
         records = convert_excel_to_records(uploaded, cod_forn, cod_cli)
         base_txt = "\n".join(records) + "\n"
 
-        # Inizializza alla prima lettura o se il contenuto cambia
+        # Inizializzazione griglia solo quando cambia vero contenuto
         if base_txt != st.session_state.txt_base or st.session_state.grid_df.empty:
             st.session_state.txt_base = base_txt
             st.session_state.grid_df = text_to_grid_df(base_txt, 128, st.session_state.show_dots)
@@ -330,29 +325,28 @@ if uploaded:
 
         st.success(f"OK ✅ Records generati: {len(records)}")
 
-        # Se l'utente cambia la preferenza dei puntini, rigenera SOLO la vista (non i dati sottostanti)
-        st.session_state.grid_df = text_to_grid_df(
-            grid_df_to_text(st.session_state.grid_df, True),  # togli eventuali '·' precedenti
-            128,
-            st.session_state.show_dots
-        )
+        # Applica conversione spazi↔︎· SOLO quando il toggle cambia
+        if st.session_state.show_dots != st.session_state.last_show_dots:
+            st.session_state.grid_df = toggle_dots_inplace(
+                st.session_state.grid_df, to_show_dots=st.session_state.show_dots
+            )
+            st.session_state.last_show_dots = st.session_state.show_dots
 
         # ====== GRIGLIA UNICA EDITABILE ======
         edited = st.data_editor(
             st.session_state.grid_df,
             key="grid_all",
             use_container_width=True,
-            num_rows="dynamic",   # puoi anche aggiungere/eliminare righe se serve
+            num_rows="fixed",      # fisso = meno ricalcoli mentre scrivi
             disabled=False,
-            column_order=["TYPE", "⟂"] + [str(i) for i in range(1, 129)],
+            column_order=["TYPE", "⟂"] + CHAR_COLS,
             hide_index=False,
             column_config={
                 "TYPE": st.column_config.TextColumn("TYPE", help="Prime 2 cifre della riga (01 testata, 02 dettaglio)."),
-                "⟂": st.column_config.TextColumn("⟂", help="Banda visiva: piena per le testate."),
+                "⟂": st.column_config.TextColumn("⟂", help="Banda visiva piena per le testate (01)."),
             }
         )
-
-        # Aggiorna stato con l'editing
+        # Aggiorno lo stato SOLO con il risultato di data_editor (nessuna altra trasformazione)
         st.session_state.grid_df = edited
 
         # Info salvataggio
