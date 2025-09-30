@@ -4,7 +4,7 @@ import re
 import unicodedata
 from datetime import datetime
 
-# === NUOVO: AG-Grid super fluida ===
+# Grid fluida
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 st.set_page_config(page_title="Excel → TXT Bolle", page_icon="📦", layout="wide")
@@ -22,7 +22,8 @@ def normcol(s: str) -> str:
 
 def pick_col(norm_map, candidates):
     for c in candidates:
-        if c in norm_map: return norm_map[c]
+        if c in norm_map:
+            return norm_map[c]
     for real_norm, real_name in norm_map.items():
         if any(real_norm.startswith(c) for c in candidates):
             return real_name
@@ -68,7 +69,8 @@ def build_fixed_line(fields, total=128):
     return "".join(buf)
 
 def clean_descr(s: str) -> str:
-    if not isinstance(s, str): return ""
+    if not isinstance(s, str):
+        return ""
     s = re.sub(r"\s+", " ", s).strip()
     prev = None
     while prev != s:
@@ -85,7 +87,8 @@ def um_from_cols(um_val, descr_val) -> str:
 def pick_sheet(xls: pd.ExcelFile) -> str:
     for s in xls.sheet_names:
         nl = s.lower()
-        if "righe" in nl and "doc" in nl: return s
+        if "righe" in nl and "doc" in nl:
+            return s
     return xls.sheet_names[0]
 
 # ---------------- Conversione ----------------
@@ -148,18 +151,24 @@ def convert_excel_to_records(excel_bytes, cod_forn="", cod_cli_ricev=""):
                 (120,9, ""),
             ]
             lineH = build_fixed_line(fieldsH, 128)
-            if len(lineH) != 128: raise ValueError("Record 01 non lungo 128.")
+            if len(lineH) != 128:
+                raise ValueError("Record 01 non lungo 128.")
             records.append(lineH)
             continue
 
         # DETTAGLIO (02)
-        if current_header is None: continue
+        if current_header is None:
+            continue
+
         cod_val = row.get(col_cod, None)
         qta_val = row.get(col_qta, None)
-        if pd.isna(cod_val) or pd.isna(qta_val): continue
+        if pd.isna(cod_val) or pd.isna(qta_val):
+            continue
 
-        try: codice_art = str(int(cod_val))
-        except: codice_art = str(cod_val or "")
+        try:
+            codice_art = str(int(cod_val))
+        except:
+            codice_art = str(cod_val or "")
 
         descr_pulita = clean_descr(descr_raw)
         um_val = row.get(col_um, "") if col_um else ""
@@ -173,20 +182,21 @@ def convert_excel_to_records(excel_bytes, cod_forn="", cod_cli_ricev=""):
             (23,30, left_pad(descr_pulita, 30)),
             (53, 2, left_pad(um, 2)),
             (55,10, quantita),
-            (65,12, ""),   # Prezzo BLANK
-            (74,12, ""),   # Importo BLANK
-            (83, 4, " "),  # Pezzi BLANK
-            (87, 1, ""),   # Ass. IVA BLANK
-            (88, 2, " "),  # Cod. IVA BLANK
-            (90, 1, ""),   # Tipo movimento BLANK
-            (91, 1, "1"),  # Tipo cessione
+            (65,12, ""),  # Prezzo BLANK
+            (74,12, ""),  # Importo BLANK
+            (83, 4, " "), # Pezzi BLANK
+            (87, 1, ""),  # Ass. IVA BLANK
+            (88, 2, " "), # Cod. IVA BLANK
+            (90, 1, ""),  # Tipo movimento BLANK
+            (91, 1, "1"), # Tipo cessione
             (92, 5, "00000"), # Colli
-            (97,12, ""),   # Filler
-            (109,1, ""),   # Tipo resa
-            (110,19, ""),  # Filler finale
+            (97,12, ""),  # Filler
+            (109,1, ""),  # Tipo resa
+            (110,19, ""), # Filler finale
         ]
         lineD = build_fixed_line(fieldsD, 128)
-        if len(lineD) != 128: raise ValueError("Record 02 non lungo 128.")
+        if len(lineD) != 128:
+            raise ValueError("Record 02 non lungo 128.")
         records.append(lineD)
 
     if not records:
@@ -204,7 +214,7 @@ def text_to_df(text: str, width: int = 128) -> pd.DataFrame:
         rows.append(list(padded))
     df = pd.DataFrame(rows, columns=CHAR_COLS)
     df.index = range(1, len(df) + 1)
-    return df
+    return df.astype(str)
 
 def df_to_text(df: pd.DataFrame) -> str:
     out_lines = []
@@ -283,49 +293,59 @@ if uploaded:
 
         st.success(f"OK ✅ Records generati: {len(records)}")
 
-        # --------- AG-Grid options (ultra fluido) ----------
+        # --------- AG-Grid options (fluida & davvero editabile) ----------
+        st.session_state.grid_df = st.session_state.grid_df.astype(str)
+
         gb = GridOptionsBuilder.from_dataframe(st.session_state.grid_df)
+        gb.configure_default_column(
+            editable=True,                 # tutte le colonne editabili
+            cellEditor='agTextCellEditor', # editor testuale
+            resizable=False,
+            sortable=False,
+            filter=False,
+        )
+
         gb.configure_grid_options(
             rowHeight=24,
-            suppressMovableColumns=True,
-            enableRangeSelection=True,
-            suppressCellSelection=False,
             singleClickEdit=True,
-            editType="fullCell",
+            stopEditingWhenCellsLoseFocus=False,
+            enableCellTextSelection=True,
             ensureDomOrder=True,
-            rowBuffer=20,
+            undoRedoCellEditing=True,
+            undoRedoCellEditingLimit=200,
+            rowBuffer=50,
             domLayout="normal",
+            suppressMovableColumns=True,
+            maintainColumnOrder=True,
         )
-        # colonne 1..128: editable + valueSetter (limita a 1 char; '·' -> spazio)
-        one_char_setter = JsCode("""
-            function(params){
-                let v = params.newValue;
+
+        # parser: limita a 1 char, converte '·' in spazio
+        one_char_parser = JsCode("""
+            function(p){
+                let v = p.newValue;
                 if (v === null || v === undefined) v = " ";
                 v = String(v);
                 if (v === "·") v = " ";
                 if (v.length === 0) v = " ";
-                params.data[params.colDef.field] = v.substring(0,1);
-                return true;
+                return v.substring(0,1);
             }
         """)
-        # formatter: mostra · per spazi (solo rendering)
-        space_formatter_on  = JsCode("function(params){ return (params.value === ' ') ? '·' : params.value; }")
-        space_formatter_off = JsCode("function(params){ return params.value; }")
+
+        # formatter di sola vista: mostra puntino per spazi
+        space_formatter_on  = JsCode("function(p){ return (p.value === ' ') ? '·' : p.value; }")
+        space_formatter_off = JsCode("function(p){ return p.value; }")
+        formatter = space_formatter_on if st.session_state.show_dots else space_formatter_off
 
         for c in CHAR_COLS:
             gb.configure_column(
                 c,
                 header_name=c,
-                editable=True,
                 width=26,
-                resizable=False,
-                sortable=False,
-                filter=False,
-                valueSetter=one_char_setter,
-                valueFormatter=space_formatter_on if st.session_state.show_dots else space_formatter_off,
+                valueParser=one_char_parser,   # parsing input
+                valueFormatter=formatter,      # visualizzazione
             )
 
-        # Colonna TYPE (calcolata, non editabile) per capire al volo 01/02
+        # Colonna TYPE calcolata (prime 2 colonne)
         gb.configure_column(
             "TYPE",
             header_name="TYPE",
@@ -333,42 +353,40 @@ if uploaded:
             editable=False,
             pinned='left',
             width=60,
-            resizable=False,
-            sortable=False,
-            filter=False,
         )
-        # Inserisci TYPE come prima colonna
+
+        # Ordine colonne: TYPE poi 1..128
         col_order = ["TYPE"] + CHAR_COLS
         grid_options = gb.build()
-        grid_options["columnDefs"].sort(key=lambda d: col_order.index(d["field"]))
+        # aggiungi TYPE in testa
+        grid_options["columnDefs"].append({"field": "TYPE"})
+        grid_options["columnDefs"].sort(key=lambda d: col_order.index(d["field"]) if d["field"] in col_order else 9999)
 
-        # Righe testata (01) più scure
+        # Evidenziazione righe '01'
         grid_options["getRowStyle"] = JsCode("""
             function(params){
                 var c1 = params.data['1'] || ' ';
                 var c2 = params.data['2'] || ' ';
                 if (c1==='0' && c2==='1'){
-                    return { backgroundColor: '#1f2937', color: '#e5e7eb' }; // grigio scuro
+                    return { backgroundColor: '#1f2937', color: '#e5e7eb' };
                 }
                 return null;
             }
         """)
 
-        # Rendering
         grid_resp = AgGrid(
             st.session_state.grid_df,
             gridOptions=grid_options,
-            theme="streamlit",  # light/dark si adatta
+            theme="streamlit",
             height=min(600, 28 * max(10, len(st.session_state.grid_df) + 2)),
-            fit_columns_on_grid_load=False,
             allow_unsafe_jscode=True,
-            update_mode=GridUpdateMode.VALUE_CHANGED,      # commit cell -> rerun (veloce)
-            data_return_mode=DataReturnMode.AS_INPUT,       # ritorna i valori correnti
+            update_mode=GridUpdateMode.MODEL_CHANGED,   # batch → fluido
+            data_return_mode=DataReturnMode.AS_INPUT,
+            fit_columns_on_grid_load=False,
         )
 
-        # Aggiorna il DF in sessione SOLO quando arriva un delta dal grid
         if grid_resp and "data" in grid_resp:
-            st.session_state.grid_df = pd.DataFrame(grid_resp["data"])
+            st.session_state.grid_df = pd.DataFrame(grid_resp["data"]).drop(columns=["TYPE"], errors="ignore").astype(str)
 
         # Info salvataggio
         if st.session_state.last_saved_at:
