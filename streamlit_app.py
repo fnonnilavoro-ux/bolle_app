@@ -3,7 +3,6 @@ import pandas as pd
 import re
 import unicodedata
 from datetime import datetime
-import io
 
 st.set_page_config(page_title="Excel → TXT Bolle", page_icon="📦", layout="wide")
 st.title("Excel → TXT (record fissi 128)")
@@ -220,53 +219,109 @@ with c2:
 
 uploaded = st.file_uploader("Carica Excel (.xlsx / .xls)", type=["xlsx", "xls"])
 
-# Stato per l'anteprima modificabile (inizializzati una volta)
+# --- Stato per preview/salvataggio ---
 if "txt_base" not in st.session_state:
     st.session_state.txt_base = ""
 if "txt_preview" not in st.session_state:
     st.session_state.txt_preview = ""
+if "txt_saved" not in st.session_state:
+    st.session_state.txt_saved = ""   # ultima versione SALVATA (per il download)
+if "last_saved_at" not in st.session_state:
+    st.session_state.last_saved_at = None
+
+def make_grid_dataframe(text: str, width: int = 128, show_dots: bool = True) -> pd.DataFrame:
+    """
+    Converte il testo in griglia (riga x colonna) con 1 char per cella.
+    - width: larghezza fissa (128 per il tuo tracciato)
+    - show_dots: se True, visualizza gli spazi come '·' solo a video
+    """
+    rows = []
+    lines = text.splitlines()
+    for i, line in enumerate(lines, start=1):
+        padded = (line[:width]).ljust(width)
+        row = {}
+        for pos, ch in enumerate(padded, start=1):
+            if show_dots and ch == " ":
+                row[pos] = "·"
+            else:
+                row[pos] = ch
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    df.index = range(1, len(df) + 1)  # numerazione righe 1..N
+    df.columns = range(1, width + 1)  # numerazione colonne 1..width
+    return df
+
+# CSS per monospazio e preservare spazi nella tabella
+st.markdown("""
+<style>
+/* forza monospace nella griglia */
+div[data-testid="stDataFrame"] table {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+div[data-testid="stDataFrame"] td, div[data-testid="stDataFrame"] th {
+  white-space: pre !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 if uploaded:
     try:
         records = convert_excel_to_records(uploaded, cod_forn, cod_cli)
         st.success(f"OK ✅ Records generati: {len(records)}")
 
-        # (Facoltativo) Anteprima tecnica delle prime 5 righe non modificabile
-        st.code("\n".join(records[:5]), language="text")
-
         # TESTO FINALE
         txt = "\n".join(records) + "\n"
 
-        # Se è cambiato il file/risultato, aggiorna base e anteprima
+        # Se è cambiato il risultato, reset base, preview e saved
         if txt != st.session_state.txt_base:
             st.session_state.txt_base = txt
             st.session_state.txt_preview = txt
+            st.session_state.txt_saved = txt
+            st.session_state.last_saved_at = None
 
-        # ---- Anteprima MODIFICABILE + Download ----
+        # ---- Barra azioni (Ripristina / Salva) ----
         st.subheader("📝 Anteprima TXT (modificabile)")
-        st.caption("Il file scaricato userà esattamente questo contenuto.")
+        top_l, top_c, top_r = st.columns([1, 2, 1], vertical_alignment="center")
+        with top_l:
+            if st.button("↩️ Ripristina TXT originale", use_container_width=True):
+                st.session_state.txt_preview = st.session_state.txt_base
+                st.toast("Anteprima ripristinata")
+        with top_r:
+            if st.button("💾 Salva modifiche", use_container_width=True):
+                st.session_state.txt_saved = st.session_state.txt_preview
+                st.session_state.last_saved_at = datetime.now().strftime("%H:%M:%S")
+                st.toast("Modifiche salvate")
 
+        if st.session_state.last_saved_at:
+            st.caption(f"Ultimo salvataggio: **{st.session_state.last_saved_at}**")
+
+        # Editor
         st.session_state.txt_preview = st.text_area(
             label="Contenuto TXT",
             value=st.session_state.txt_preview,
-            height=420,
+            height=320,
             key="txt_preview_area",
         )
 
-        colA, colB = st.columns([1,1])
-        with colA:
-            if st.button("↩️ Ripristina TXT originale", use_container_width=True):
-                st.session_state.txt_preview = st.session_state.txt_base
-                st.rerun()
+        # ---- Griglia caratteri (vista) ----
+        st.markdown("#### 🔍 Griglia caratteri (anteprima visiva)")
+        show_dots = st.checkbox("Mostra spazi come · (solo anteprima)", value=True)
+        grid_df = make_grid_dataframe(st.session_state.txt_preview, width=128, show_dots=show_dots)
+        # Nota: è una vista, non modifica il testo vero
+        st.dataframe(grid_df, use_container_width=True, height=min(600, 36 + 24 * min(20, len(grid_df))))
 
-        with colB:
-            st.download_button(
-                "⬇️ Scarica TXT",
-                data=st.session_state.txt_preview.encode(encoding, errors="strict"),
-                file_name="export_bolle.txt",
-                mime="text/plain",
-                use_container_width=True,
-            )
+        # ---- Download: usa SOLO la versione SALVATA ----
+        st.markdown("---")
+        st.caption("Il download utilizza l'ultima versione **SALVATA** (non quella in modifica).")
+        data_to_download = st.session_state.txt_saved.encode(encoding, errors="strict")
+        st.download_button(
+            "⬇️ Scarica TXT (versione salvata)",
+            data=data_to_download,
+            file_name="export_bolle.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
 
     except Exception as e:
         st.error(f"Errore: {e}")
