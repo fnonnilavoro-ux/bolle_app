@@ -1,231 +1,209 @@
 import io
-import re
-import hashlib
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
-from processor import (
-    read_table_any,
-    suggest_column_mapping,
-    clean_product_name,
-    coerce_number,
-)
+# =========================
+# CONFIG APP
+# =========================
+st.set_page_config(page_title="Bolle App — Export TXT", page_icon="📦", layout="wide")
+st.title("📦 Bolle App — Export TXT (Anteprima modificabile)")
+
+# -------------------------
+# FORMATO DI DEFAULT (puoi cambiarli nell'Expander "Impostazioni (opzionali)")
+# -------------------------
+DEFAULT_SPAZI_NOME_QTY = 1     # spazi tra NOME e PEZZI
+DEFAULT_SPAZI_QTY_KG   = 26    # spazi tra PEZZI e KG
+DEFAULT_DECIMALI_KG    = 3     # decimali per KG
+DEFAULT_DEC_SEP        = "."   # "." oppure ","
+DEFAULT_FILENAME_BASE  = "bolle_export"
+
+# Stato per anteprima
+if "txt_base" not in st.session_state:
+    st.session_state.txt_base = ""
+if "txt_preview" not in st.session_state:
+    st.session_state.txt_preview = ""
 
 # =========================
-# Config
+# FUNZIONI
 # =========================
-st.set_page_config(page_title="Bolle App", page_icon="📦", layout="wide")
+def read_excel_any(file) -> pd.DataFrame:
+    """Legge il primo foglio dell'Excel; se non è Excel, prova CSV."""
+    name = getattr(file, "name", "") or ""
+    if name.lower().endswith((".xlsx", ".xls")):
+        return pd.read_excel(file)
+    # Fallback: CSV
+    content = file.read()
+    if isinstance(content, bytes):
+        text = content.decode("utf-8", errors="ignore")
+    else:
+        text = str(content)
+    sep = ";" if text.count(";") > text.count(",") else ","
+    return pd.read_csv(io.StringIO(text), sep=sep)
 
-# =========================
-# Utils - Preview & Download
-# =========================
-def _hash_text(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()
+def guess_mapping(columns):
+    """Tenta di trovare colonne (nome, pezzi, kg) in base al nome."""
+    cols_low = [c.lower() for c in columns]
 
-def preview_and_download(generated_txt: str, default_filename: str = None, encoding: str = "utf-8"):
-    """
-    Mostra un'anteprima EDITABILE del TXT.
-    Il file scaricato è SEMPRE il contenuto attuale dell'anteprima.
-    """
-    if not isinstance(generated_txt, str):
-        st.error("preview_and_download: atteso testo (str).")
-        return
+    def find(keys, default_idx=0):
+        for i, c in enumerate(cols_low):
+            if any(k in c for k in keys):
+                return columns[i]
+        return columns[min(default_idx, len(columns)-1)]
 
-    if not default_filename:
-        default_filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    col_nome = find(["nome", "prodotto", "descr", "articolo"], 0)
+    col_qty  = find(["pezzi", "quant", "qta", "qty"], 1 if len(columns) > 1 else 0)
+    col_kg   = find(["kg", "peso", "weight"], 2 if len(columns) > 2 else len(columns)-1)
+    return {"nome": col_nome, "pezzi": col_qty, "kg": col_kg}
 
-    current_hash = _hash_text(generated_txt)
-    if "preview_state" not in st.session_state:
-        st.session_state.preview_state = {"orig_hash": None, "text": generated_txt}
+def to_number(v, integer=False):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return 0 if integer else 0.0
+    if isinstance(v, (int, float)):
+        return int(v) if integer else float(v)
+    s = str(v).strip().replace(" ", "")
+    # Converti "1.234,56" -> "1234.56"
+    if s.count(",") > 0 and s.count(".") == 0:
+        s = s.replace(".", "")
+        s = s.replace(",", ".")
+    else:
+        # Rimuovi separatori migliaia con virgola (es. "1,234.56" -> "1234.56")
+        if s.count(",") > 1:
+            s = s.replace(",", "")
+    try:
+        x = float(s)
+    except Exception:
+        x = 0.0
+    return int(round(x)) if integer else float(x)
 
-    if st.session_state.preview_state.get("orig_hash") != current_hash:
-        st.session_state.preview_state = {"orig_hash": current_hash, "text": generated_txt}
+def fmt_kg(value: float, decimali: int, dec_sep: str) -> str:
+    s = f"{float(value):.{decimali}f}"
+    if dec_sep == ",":
+        s = s.replace(".", ",")
+    return s
 
-    st.subheader("📝 Anteprima TXT (modificabile)")
-    st.caption("Modifica liberamente qui sotto: il file scaricato sarà esattamente questo contenuto.")
+def build_txt(df: pd.DataFrame,
+              col_nome: str, col_pezzi: str, col_kg: str,
+              spazi_nome_qty: int, spazi_qty_kg: int,
+              decimali_kg: int, dec_sep: str) -> str:
+    """Crea il TXT finale riga per riga, senza fermate intermedie."""
+    lines = []
+    for r in df.itertuples(index=False):
+        nome  = str(getattr(r, col_nome))
+        pezzi = to_number(getattr(r, col_pezzi), integer=True)
+        kg    = to_number(getattr(r, col_kg), integer=False)
 
-    st.session_state.preview_state["text"] = st.text_area(
-        label="Contenuto TXT",
-        value=st.session_state.preview_state["text"],
-        key="txt_preview_area",
-        height=420,
-        help="Questo è il testo che verrà scaricato.",
-    )
-
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
-        if st.button("↩️ Ripristina originale", use_container_width=True):
-            st.session_state.preview_state["text"] = generated_txt
-            st.rerun()
-    with col2:
-        st.download_button(
-            label="⬇️ Scarica TXT",
-            data=st.session_state.preview_state["text"].encode(encoding, errors="ignore"),
-            file_name=default_filename,
-            mime="text/plain",
-            use_container_width=True,
-        )
-    with col3:
-        enc = st.selectbox(
-            "Encoding",
-            ["utf-8", "cp1252", "latin-1"],
-            index=["utf-8", "cp1252", "latin-1"].index(encoding),
-        )
-        if enc != encoding:
-            # Forza rerender mantenendo il testo
-            st.session_state.preview_state["text"] = st.session_state.preview_state["text"]
-            st.rerun()
-
-# =========================
-# Sidebar - Parametri
-# =========================
-st.sidebar.header("⚙️ Impostazioni Output")
-
-spazi_qty_kg = st.sidebar.number_input(
-    "Spazi tra quantità (pezzi) e kg", min_value=0, max_value=200, value=26, step=1,
-    help="Numero esatto di spazi fissi tra il valore 'pezzi' e il valore 'kg'."
-)
-
-spazi_nome_qty = st.sidebar.number_input(
-    "Spazi tra nome prodotto e quantità", min_value=1, max_value=200, value=1, step=1,
-    help="Spazi tra il nome del prodotto e la quantità."
-)
-
-decimali_kg = st.sidebar.number_input(
-    "Decimali per kg", min_value=0, max_value=6, value=3, step=1,
-    help="Quanti decimali mostrare per i kg nel TXT."
-)
-
-usa_virgola_decimale = st.sidebar.checkbox(
-    "Usa virgola come separatore decimale (kg)", value=False,
-    help="Se attivo, i kg verranno formattati con la virgola (es. 12,345)."
-)
-
-pulizia_nome = st.sidebar.selectbox(
-    "Pulizia nome prodotto",
-    ["Nessuna", "Base (rimuovi codici/sku comuni)", "Aggressiva (solo lettere, numeri, spazi, -_/.)"],
-    index=1,
-    help="Controlla quanto 'pulire' i nomi (rimuovere codici, parentesi, SKU, ecc.)."
-)
-
-rimuovi_doppispazi = st.sidebar.checkbox(
-    "Compatta spazi multipli nel nome prodotto", value=True,
-    help="Sostituisce sequenze di spazi multipli con uno spazio singolo all'interno del nome."
-)
-
-nome_file_base = st.sidebar.text_input(
-    "Nome file (senza estensione)", value="bolle_export",
-    help="Il file scaricato sarà <nome>.txt"
-)
-
-st.sidebar.markdown("---")
-st.sidebar.caption("Carica CSV o Excel. Poi mappa le colonne e genera l'anteprima.")
+        left   = f"{nome}{' ' * spazi_nome_qty}{int(pezzi)}"
+        middle = " " * spazi_qty_kg
+        right  = fmt_kg(kg, decimali_kg, dec_sep)
+        lines.append(f"{left}{middle}{right}")
+    return "\n".join(lines)
 
 # =========================
-# Upload
+# UI — UPLOAD
 # =========================
-st.title("📦 Bolle App — Generatore TXT con Anteprima Modificabile")
-
-uploaded = st.file_uploader("Carica file (.csv, .xlsx, .xls)", type=["csv", "xlsx", "xls"])
+uploaded = st.file_uploader("Carica il tuo file Excel (.xlsx/.xls). Supporto anche .csv.", type=["xlsx", "xls", "csv"])
 if not uploaded:
-    st.info("Carica un file per iniziare.")
+    st.info("Carica un file per generare il TXT.")
     st.stop()
 
-# Leggi tabella
+# Leggi file
 try:
-    df = read_table_any(uploaded)
+    df = read_excel_any(uploaded)
 except Exception as e:
     st.error(f"Errore lettura file: {e}")
     st.stop()
 
 if df.empty:
-    st.error("Il file è vuoto o non contiene righe valide.")
+    st.error("Il file sembra vuoto.")
     st.stop()
 
-st.success(f"File caricato: {uploaded.name} — {len(df):,} righe")
-with st.expander("Anteprima tabella (prime 50 righe)"):
+# Mappatura automatica colonne
+mapping = guess_mapping(df.columns)
+
+# Impostazioni opzionali (collassate: NON interrompono il tuo flusso)
+with st.expander("Impostazioni (opzionali)"):
+    colA, colB, colC = st.columns(3)
+    with colA:
+        spazi_nome_qty = st.number_input("Spazi NOME → PEZZI", min_value=0, max_value=200,
+                                         value=DEFAULT_SPAZI_NOME_QTY, step=1)
+    with colB:
+        spazi_qty_kg   = st.number_input("Spazi PEZZI → KG", min_value=0, max_value=200,
+                                         value=DEFAULT_SPAZI_QTY_KG, step=1)
+    with colC:
+        decimali_kg    = st.number_input("Decimali KG", min_value=0, max_value=6,
+                                         value=DEFAULT_DECIMALI_KG, step=1)
+
+    dec_sep = st.radio("Separatore decimale (KG)", options=[".", ","],
+                       index=0 if DEFAULT_DEC_SEP == "." else 1, horizontal=True)
+
+    filename_base = st.text_input("Nome file (senza .txt)", value=DEFAULT_FILENAME_BASE)
+
+# Se l'utente non apre l'expander, usa i default
+if "spazi_nome_qty" not in locals():
+    spazi_nome_qty = DEFAULT_SPAZI_NOME_QTY
+    spazi_qty_kg   = DEFAULT_SPAZI_QTY_KG
+    decimali_kg    = DEFAULT_DECIMALI_KG
+    dec_sep        = DEFAULT_DEC_SEP
+    filename_base  = DEFAULT_FILENAME_BASE
+
+# =========================
+# 1) GENERA TXT FINALE
+# =========================
+try:
+    txt = build_txt(
+        df=df,
+        col_nome=mapping["nome"],
+        col_pezzi=mapping["pezzi"],
+        col_kg=mapping["kg"],
+        spazi_nome_qty=spazi_nome_qty,
+        spazi_qty_kg=spazi_qty_kg,
+        decimali_kg=decimali_kg,
+        dec_sep=dec_sep,
+    )
+except Exception as e:
+    st.error(f"Errore durante la generazione del TXT: {e}")
+    st.stop()
+
+# Aggiorna base e, se è un nuovo file, resetta l'anteprima
+if txt != st.session_state.txt_base:
+    st.session_state.txt_base = txt
+    st.session_state.txt_preview = txt
+
+# =========================
+# 2) MOSTRA ANTEPRIMA MODIFICABILE
+# =========================
+st.subheader("📝 Anteprima TXT (modificabile)")
+st.caption("Il download userà esattamente questo contenuto.")
+
+st.session_state.txt_preview = st.text_area(
+    label="Contenuto TXT",
+    value=st.session_state.txt_preview,
+    height=420,
+    key="txt_preview_area",
+)
+
+c1, c2, c3 = st.columns([1,1,2])
+with c1:
+    if st.button("↩️ Ripristina TXT originale", use_container_width=True):
+        st.session_state.txt_preview = st.session_state.txt_base
+        st.rerun()
+with c2:
+    final_name = (filename_base.strip() or DEFAULT_FILENAME_BASE) + ".txt"
+    st.download_button(
+        label="⬇️ Scarica TXT",
+        data=st.session_state.txt_preview.encode("utf-8", errors="ignore"),
+        file_name=final_name,
+        mime="text/plain",
+        use_container_width=True,
+    )
+with c3:
+    st.write("")  # spazio
+    st.caption(f"Righe: {st.session_state.txt_preview.count('\\n') + 1:,} — File: **{final_name}**")
+
+# =========================
+# 3) (OPZIONALE) ANTEPRIMA TABELLA
+# =========================
+with st.expander("Anteprima dati (prime 50 righe) — solo per controllo, non obbligatoria"):
     st.dataframe(df.head(50), use_container_width=True)
-
-# =========================
-# Mappatura colonne
-# =========================
-st.subheader("🧭 Mappa le colonne")
-suggest = suggest_column_mapping(df.columns)
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    col_nome = st.selectbox("Colonna: Nome Prodotto", options=df.columns.tolist(),
-                            index=df.columns.get_indexer([suggest.get("name", df.columns[0])])[0])
-with col2:
-    col_pezzi = st.selectbox("Colonna: Quantità (pezzi)", options=df.columns.tolist(),
-                             index=df.columns.get_indexer([suggest.get("qty", df.columns[min(1, len(df.columns)-1)])])[0])
-with col3:
-    col_kg = st.selectbox("Colonna: Kg", options=df.columns.tolist(),
-                          index=df.columns.get_indexer([suggest.get("kg", df.columns[min(2, len(df.columns)-1)])])[0])
-
-# =========================
-# Trasformazioni
-# =========================
-def transform_name(x: str) -> str:
-    s = str(x) if pd.notna(x) else ""
-    if pulizia_nome.startswith("Base"):
-        s = clean_product_name(s, mode="base")
-    elif pulizia_nome.startswith("Aggressiva"):
-        s = clean_product_name(s, mode="aggressive")
-    if rimuovi_doppispazi:
-        s = re.sub(r"\s{2,}", " ", s).strip()
-    return s
-
-work = pd.DataFrame({
-    "nome": df[col_nome].map(transform_name),
-    "pezzi": df[col_pezzi].map(lambda v: coerce_number(v, integer=True)),
-    "kg": df[col_kg].map(lambda v: coerce_number(v, integer=False)),
-})
-
-# Avvisi qualità dati
-bad_qty = work["pezzi"].isna().sum()
-bad_kg = work["kg"].isna().sum()
-if bad_qty or bad_kg:
-    st.warning(f"⚠️ Valori non numerici: pezzi={bad_qty}, kg={bad_kg}. Saranno trattati come 0.")
-    work["pezzi"] = work["pezzi"].fillna(0).astype(int)
-    work["kg"] = work["kg"].fillna(0.0)
-
-# =========================
-# Generazione TXT (grezza)
-# =========================
-def fmt_kg(value: float) -> str:
-    if value is None:
-        value = 0.0
-    if usa_virgola_decimale:
-        # Usa virgola come separatore
-        s = f"{value:.{decimali_kg}f}".replace(".", ",")
-    else:
-        s = f"{value:.{decimali_kg}f}"
-    return s
-
-def build_line(nome: str, pezzi: int, kg: float) -> str:
-    left = f"{nome}{' ' * spazi_nome_qty}{int(pezzi)}"
-    middle = " " * spazi_qty_kg
-    right = fmt_kg(kg)
-    return f"{left}{middle}{right}"
-
-lines = [build_line(r.nome, r.pezzi, r.kg) for r in work.itertuples(index=False)]
-generated_txt = "\n".join(lines)
-
-# =========================
-# Anteprima NON modificabile (tabellare) + differenze spazi
-# =========================
-with st.expander("🔎 Controllo formattazione (non modificabile)"):
-    show = work.copy()
-    show["__spazi_nome_qty__"] = spazi_nome_qty
-    show["__spazi_qty_kg__"] = spazi_qty_kg
-    st.dataframe(show.head(100), use_container_width=True)
-    st.code("\n".join(lines[:10]), language="text")
-
-# =========================
-# Anteprima MODIFICABILE + Download
-# =========================
-final_name = (nome_file_base.strip() or "bolle_export") + ".txt"
-preview_and_download(generated_txt, default_filename=final_name, encoding="utf-8")
