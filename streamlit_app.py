@@ -4,11 +4,11 @@ import re, unicodedata
 from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
-# ----------------- CONFIG -----------------
+# ============ CONFIG BASE ============
 st.set_page_config(page_title="📦 Excel → TXT (record fissi 128)", page_icon="📦", layout="wide")
-st.markdown("<h1 style='margin:0 0 6px 0'>📦 Excel → TXT (record fissi 128)</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='margin:0 0 8px 0'>📦 Excel → TXT (record fissi 128)</h1>", unsafe_allow_html=True)
 
-# ----------------- UTILS -----------------
+# ============ FUNZIONI UTILI ============
 def strip_accents(s: str) -> str:
     return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
 
@@ -24,12 +24,9 @@ def pick_col(norm_map, candidates):
         if any(real_norm.startswith(c) for c in candidates): return real_name
     return None
 
-HDR_RE = re.compile(
-    r"(?:\*\*\s*)?Rif\.\s*Doc\.\s*di\s*trasporto\s*(\d+)\s*del\s*(\d{2}/\d{2}/\d{4})[:\s]*",
-    re.IGNORECASE
-)
+HDR_RE = re.compile(r"(?:\*\*\s*)?Rif\.\s*Doc\.\s*di\s*trasporto\s*(\d+)\s*del\s*(\d{2}/\d{2}/\d{4})[:\s]*", re.IGNORECASE)
 
-# Pulizia descrizioni con regex semplici
+# code-clean descrizioni (no mega-pattern)
 PACK_TAIL_PATTERNS = [
     re.compile(r"\s*\(\s*\d+\s*(?:pz|pzs?|b)\.?\s*\)\s*$", re.IGNORECASE),
     re.compile(r"\s*-\s*\d+\s*(?:pz|pzs?|b)\.?\s*$", re.IGNORECASE),
@@ -153,7 +150,7 @@ def text_to_df(text:str)->pd.DataFrame:
 def df_to_text(df:pd.DataFrame)->str:
     return "\n".join("".join((str(x) or " ")[0] for x in row) for row in df.values) + "\n"
 
-# ----------------- SESSION -----------------
+# ============ SESSION ============
 if "txt_base" not in st.session_state:   st.session_state.txt_base=""
 if "txt_saved" not in st.session_state:  st.session_state.txt_saved=""
 if "grid_df"  not in st.session_state:   st.session_state.grid_df=pd.DataFrame()
@@ -161,10 +158,10 @@ if "grid_opts" not in st.session_state:  st.session_state.grid_opts=None
 if "ready"    not in st.session_state:   st.session_state.ready=False
 if "last_saved_at" not in st.session_state: st.session_state.last_saved_at=None
 
-# ----------------- STYLES -----------------
+# ============ STILI LEGGERI ============
 st.markdown("""
 <style>
-.toolbar { position: sticky; top: 0; z-index: 10; padding: 10px 0 8px; background: var(--background-color); }
+.toolbar { position: sticky; top: 0; z-index: 10; padding: 8px 0 8px; background: var(--background-color); }
 .ag-theme-streamlit { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace; }
 .ag-theme-streamlit .ag-cell, .ag-theme-streamlit .ag-header-cell { font-size: 12px; }
 .ag-row-hover { filter: brightness(1.05); }
@@ -172,29 +169,40 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ----------------- UPLOAD + TOOLBAR -----------------
+# ============ UPLOAD ============
 uploaded = st.file_uploader("Carica Excel (.xlsx/.xls)", type=["xlsx","xls"])
+if uploaded and not st.session_state.ready:
+    try:
+        txt = "\n".join(convert_excel_to_records(uploaded)) + "\n"
+        st.session_state.txt_base  = txt
+        st.session_state.txt_saved = txt
+        st.session_state.grid_df   = text_to_df(txt)
+        st.session_state.ready     = True
+        st.session_state.grid_opts = None
+    except Exception as e:
+        st.error(f"Errore: {e}")
 
+if not st.session_state.ready:
+    st.stop()
+
+# ============ TOOLBAR IN ALTO ============
 st.markdown('<div class="toolbar">', unsafe_allow_html=True)
-t1, t2, t3, t4 = st.columns([1,1,1,2], vertical_alignment="center")
-with t1:
+b1, b2, b3, b4 = st.columns([1,1,1,2])
+with b1:
     if st.button("💾 Salva modifiche", use_container_width=True):
-        # Prendi lo stato corrente della griglia (dal prossimo blocco post-render)
-        st.session_state.txt_saved = df_to_text(st.session_state.grid_df) if not st.session_state.grid_df.empty else ""
+        st.session_state.txt_saved = df_to_text(st.session_state.grid_df)
         st.session_state.last_saved_at = datetime.now().strftime("%H:%M:%S")
-        st.rerun()
-with t2:
+with b2:
     if st.button("↩️ Ripristina originale", use_container_width=True):
-        st.session_state.grid_df = text_to_df(st.session_state.txt_base) if st.session_state.txt_base else pd.DataFrame()
+        st.session_state.grid_df = text_to_df(st.session_state.txt_base)
         st.session_state.txt_saved = st.session_state.txt_base
         st.session_state.last_saved_at = None
-        st.rerun()
-with t3:
+with b3:
     if st.button("🧹 Reset (nuovo file)", use_container_width=True):
         for k in ["txt_base","txt_saved","grid_df","grid_opts","ready","last_saved_at"]:
             if k in st.session_state: del st.session_state[k]
         st.rerun()
-with t4:
+with b4:
     st.download_button(
         "⬇️ Scarica (versione salvata)",
         data=(st.session_state.txt_saved or "").encode("utf-8", errors="strict"),
@@ -204,30 +212,20 @@ with t4:
     )
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ----------------- PIPELINE CARICAMENTO -----------------
-if uploaded and not st.session_state.ready:
-    try:
-        txt = "\n".join(convert_excel_to_records(uploaded)) + "\n"
-        st.session_state.txt_base  = txt
-        st.session_state.txt_saved = txt
-        st.session_state.grid_df   = text_to_df(txt)
-        st.session_state.ready     = True
-        st.session_state.grid_opts = None
-        st.toast("File caricato")
-    except Exception as e:
-        st.error(f"Errore: {e}")
-
-if not st.session_state.ready:
-    st.stop()
-
-# ----------------- GRIGLIA (AG-Grid) -----------------
+# ============ COSTRUISCI GRID (UNA VOLTA) ============
 if st.session_state.grid_opts is None:
-    df = st.session_state.grid_df
-    gb = GridOptionsBuilder.from_dataframe(df)
+    gb = GridOptionsBuilder.from_dataframe(st.session_state.grid_df)
+
+    # default col
     gb.configure_default_column(
-        editable=True, cellEditor='agTextCellEditor',
-        resizable=False, sortable=False, filter=False,
+        editable=True,
+        cellEditor='agTextCellEditor',
+        resizable=False,
+        sortable=False,
+        filter=False,
+        suppressMenu=True,
     )
+
     gb.configure_grid_options(
         rowHeight=24,
         singleClickEdit=True,
@@ -236,14 +234,14 @@ if st.session_state.grid_opts is None:
         ensureDomOrder=True,
         undoRedoCellEditing=True,
         undoRedoCellEditingLimit=500,
-        rowBuffer=200,
+        rowBuffer=120,
         suppressMovableColumns=True,
         maintainColumnOrder=True,
         domLayout="normal",
         rowSelection="multiple",
     )
 
-    # Parser input (1 char) + formatter (spazio → ·)
+    # parser/formatter
     one_char_parser = JsCode("""
         function(p){
             let v = p.newValue;
@@ -256,20 +254,21 @@ if st.session_state.grid_opts is None:
     """)
     space_formatter = JsCode("function(p){ return (p.value === ' ') ? '·' : p.value; }")
 
-    # Colonna numeri di riga (UNA SOLA, non duplicarla)
+    # colonna numeri riga
     gb.configure_column(
         "ROW",
         header_name="ROW",
         valueGetter=JsCode("function(p){ return (p.node.rowIndex + 1).toString(); }"),
-        editable=False, pinned='left', width=58, suppressMenu=True
+        editable=False, pinned='left', width=62
     )
-    # Colonne 1..128
-    for c in CHAR_COLS:
+    # 1..128
+    for c in [str(i) for i in range(1,129)]:
         gb.configure_column(c, header_name=c, width=26,
                             valueParser=one_char_parser, valueFormatter=space_formatter)
 
     opts = gb.build()
-    # Evidenziazione righe testata (01)
+
+    # stile righe 01
     opts["getRowStyle"] = JsCode("""
         function(p){
             var c1 = p.data['1'] || ' ';
@@ -281,31 +280,37 @@ if st.session_state.grid_opts is None:
         }
     """)
 
-    # Ordine colonne: ROW poi 1..128 (⚠️ senza appendere di nuovo ROW → niente doppione)
-    order = ["ROW"] + CHAR_COLS
+    # ordine colonne: ROW + 1..128 (niente duplicati)
+    order = ["ROW"] + [str(i) for i in range(1,129)]
     opts["columnDefs"].sort(key=lambda d: order.index(d["field"]) if d["field"] in order else 999)
     st.session_state.grid_opts = opts
 
-# Render: NO_UPDATE → nessun rerun mentre editi
+# ============ RENDER GRID (FLUIDA) ============
+# Trucco: aggiorno i dati **in-place** così Streamlit non ricrea l’oggetto e il focus resta stabile.
 grid_resp = AgGrid(
     st.session_state.grid_df,
     gridOptions=st.session_state.grid_opts,
     theme="streamlit",
     height=min(720, 28 * max(12, len(st.session_state.grid_df) + 3)),
     allow_unsafe_jscode=True,
-    update_mode=GridUpdateMode.NO_UPDATE,     # editing solo lato client
-    data_return_mode=DataReturnMode.AS_INPUT, # modello completo al prossimo rerun
+    update_mode=GridUpdateMode.VALUE_CHANGED,   # invia solo le celle cambiate
+    data_return_mode=DataReturnMode.AS_INPUT,   # ritorna il modello aggiornato
     fit_columns_on_grid_load=False,
     reload_data=False,
 )
-
-# Aggiorna df SOLO quando la pagina fa un rerun (es. dopo SALVA/RIPRISTINA/RESET)
 if grid_resp and "data" in grid_resp:
+    # aggiornamento **in-place** per evitare ricostruzioni
     new_df = pd.DataFrame(grid_resp["data"])
-    if "ROW" in new_df.columns:  # togli colonna visuale
+    if "ROW" in new_df.columns:
         new_df = new_df.drop(columns=["ROW"])
-    st.session_state.grid_df = new_df[CHAR_COLS].astype(str)
+    new_df = new_df[[str(i) for i in range(1,129)]].astype(str)
 
-# Footer
+    # In-place update (mantiene l'oggetto e riduce flicker/focus loss)
+    if st.session_state.grid_df.shape == new_df.shape:
+        st.session_state.grid_df.iloc[:, :] = new_df.values
+    else:
+        st.session_state.grid_df = new_df.copy()
+
+# ============ FOOTER ============
 if st.session_state.last_saved_at:
     st.caption(f"Ultimo salvataggio: **{st.session_state.last_saved_at}**")
