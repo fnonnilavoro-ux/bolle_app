@@ -5,7 +5,8 @@ from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 # ----------------- CONFIG -----------------
-st.set_page_config(page_title="Excel → TXT (128)", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Excel → TXT (record fissi 128)", page_icon="📦", layout="wide")
+st.markdown("<h1 style='margin:0'>📦 Excel → TXT (record fissi 128)</h1>", unsafe_allow_html=True)
 
 # ----------------- UTILS -----------------
 def strip_accents(s: str) -> str:
@@ -28,7 +29,7 @@ HDR_RE = re.compile(
     re.IGNORECASE
 )
 
-# pulizia descrizioni senza mega-pattern
+# Pulizia descrizioni con regex semplici (no mega-pattern)
 PACK_TAIL_PATTERNS = [
     re.compile(r"\s*\(\s*\d+\s*(?:pz|pzs?|b)\.?\s*\)\s*$", re.IGNORECASE),
     re.compile(r"\s*-\s*\d+\s*(?:pz|pzs?|b)\.?\s*$", re.IGNORECASE),
@@ -160,17 +161,60 @@ if "grid_opts" not in st.session_state:  st.session_state.grid_opts=None
 if "ready"    not in st.session_state:   st.session_state.ready=False
 if "last_saved_at" not in st.session_state: st.session_state.last_saved_at=None
 
-# ----------------- UPLOAD -----------------
+# ----------------- STYLES -----------------
+st.markdown("""
+<style>
+/* barra in alto fissa */
+.toolbar { position: sticky; top: 0; z-index: 10; padding: 10px 0 8px; background: var(--background-color); }
+.ag-theme-streamlit { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace; }
+.ag-theme-streamlit .ag-cell, .ag-theme-streamlit .ag-header-cell { font-size: 12px; }
+.ag-row-hover { filter: brightness(1.05); }
+.ag-row-odd { background-color: rgba(127,127,127,0.04); }
+</style>
+""", unsafe_allow_html=True)
+
+# ----------------- UPLOAD + TOOLBAR -----------------
 uploaded = st.file_uploader("Carica Excel (.xlsx/.xls)", type=["xlsx","xls"])
 
+# Toolbar: SALVA / RIPRISTINA / RESET / SCARICA (in alto)
+st.markdown('<div class="toolbar">', unsafe_allow_html=True)
+t1, t2, t3, t4 = st.columns([1,1,1,2], vertical_alignment="center")
+with t1:
+    if st.button("💾 Salva modifiche", use_container_width=True):
+        st.session_state.txt_saved = df_to_text(st.session_state.grid_df) if not st.session_state.grid_df.empty else ""
+        st.session_state.last_saved_at = datetime.now().strftime("%H:%M:%S")
+        st.toast("Salvato")
+with t2:
+    if st.button("↩️ Ripristina originale", use_container_width=True):
+        if st.session_state.txt_base:
+            st.session_state.grid_df = text_to_df(st.session_state.txt_base)
+            st.session_state.txt_saved = st.session_state.txt_base
+            st.session_state.last_saved_at = None
+            st.toast("Ripristinato")
+with t3:
+    if st.button("🧹 Reset (nuovo file)", use_container_width=True):
+        for k in ["txt_base","txt_saved","grid_df","grid_opts","ready","last_saved_at"]:
+            if k in st.session_state: del st.session_state[k]
+        st.rerun()
+with t4:
+    st.download_button(
+        "⬇️ Scarica (versione salvata)",
+        data=(st.session_state.txt_saved or "").encode("utf-8", errors="strict"),
+        file_name="export_bolle.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ----------------- PIPELINE CARICAMENTO -----------------
 if uploaded and not st.session_state.ready:
     try:
         txt = "\n".join(convert_excel_to_records(uploaded)) + "\n"
         st.session_state.txt_base  = txt
         st.session_state.txt_saved = txt
-        st.session_state.grid_df   = text_to_df(txt)     # DF iniziale
-        st.session_state.grid_opts = None                # build una sola volta
+        st.session_state.grid_df   = text_to_df(txt)
         st.session_state.ready     = True
+        st.session_state.grid_opts = None  # build options una volta
         st.toast("File caricato")
     except Exception as e:
         st.error(f"Errore: {e}")
@@ -178,12 +222,14 @@ if uploaded and not st.session_state.ready:
 if not st.session_state.ready:
     st.stop()
 
-# ----------------- COSTRUISCI GRID (UNA VOLTA) -----------------
+# ----------------- GRIGLIA (AG-Grid) -----------------
 if st.session_state.grid_opts is None:
     df = st.session_state.grid_df
     gb = GridOptionsBuilder.from_dataframe(df)
-    gb.configure_default_column(editable=True, cellEditor='agTextCellEditor',
-                                resizable=False, sortable=False, filter=False)
+    gb.configure_default_column(
+        editable=True, cellEditor='agTextCellEditor',
+        resizable=False, sortable=False, filter=False,
+    )
     gb.configure_grid_options(
         rowHeight=24,
         singleClickEdit=True,
@@ -196,7 +242,10 @@ if st.session_state.grid_opts is None:
         suppressMovableColumns=True,
         maintainColumnOrder=True,
         domLayout="normal",
+        rowSelection="multiple",
     )
+
+    # Parser input (1 char) + formatter (spazio → ·)
     one_char_parser = JsCode("""
         function(p){
             let v = p.newValue;
@@ -209,13 +258,22 @@ if st.session_state.grid_opts is None:
     """)
     space_formatter = JsCode("function(p){ return (p.value === ' ') ? '·' : p.value; }")
 
+    # Colonna numeri di riga (non parte dei dati)
+    gb.configure_column(
+        "ROW",
+        header_name="ROW",
+        valueGetter=JsCode("function(p){ return (p.node.rowIndex + 1).toString(); }"),
+        editable=False, pinned='left', width=58, suppressMenu=True
+    )
+    # Colonne 1..128
     for c in CHAR_COLS:
         gb.configure_column(c, header_name=c, width=26,
                             valueParser=one_char_parser, valueFormatter=space_formatter)
 
-    opts = gb.build()
-    # Evidenzia le righe testata (01)
-    opts["getRowStyle"] = JsCode("""
+    st.session_state.grid_opts = gb.build()
+
+    # Evidenziazione righe testata (01)
+    st.session_state.grid_opts["getRowStyle"] = JsCode("""
         function(p){
             var c1 = p.data['1'] || ' ';
             var c2 = p.data['2'] || ' ';
@@ -225,52 +283,35 @@ if st.session_state.grid_opts is None:
             return null;
         }
     """)
-    st.session_state.grid_opts = opts
 
-# ----------------- RENDER GRID -----------------
-# IMPORTANTISSIMO: NO_UPDATE => nessun rerun mentre editi.
+    # Ordine colonne: ROW poi 1..128
+    defs = st.session_state.grid_opts["columnDefs"]
+    defs.append({"field":"ROW"})
+    order = ["ROW"] + CHAR_COLS
+    st.session_state.grid_opts["columnDefs"] = sorted(defs, key=lambda d: order.index(d["field"]) if d["field"] in order else 999)
+
+# Render: NO_UPDATE → nessun rerun mentre editi
 grid_resp = AgGrid(
     st.session_state.grid_df,
     gridOptions=st.session_state.grid_opts,
     theme="streamlit",
-    height=min(700, 28 * max(12, len(st.session_state.grid_df) + 2)),
+    height=min(720, 28 * max(12, len(st.session_state.grid_df) + 3)),
     allow_unsafe_jscode=True,
-    update_mode=GridUpdateMode.NO_UPDATE,      # <--- niente rerun durante l'editing
-    data_return_mode=DataReturnMode.AS_INPUT,  # restituisce tutto il modello alla prossima esecuzione
+    update_mode=GridUpdateMode.NO_UPDATE,
+    data_return_mode=DataReturnMode.AS_INPUT,
     fit_columns_on_grid_load=False,
     reload_data=False,
 )
 
-# ----------------- BOTTONI (TRIGGER RERUN SOLO QUI) -----------------
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    if st.button("💾 Salva modifiche", use_container_width=True):
-        # Al rerun successivo, AgGrid ci passa i dati correnti dell'editor
-        if grid_resp and "data" in grid_resp:
-            edited = pd.DataFrame(grid_resp["data"])[CHAR_COLS].astype(str)
-            st.session_state.grid_df = edited
-            st.session_state.txt_saved = df_to_text(edited)
-            st.session_state.last_saved_at = datetime.now().strftime("%H:%M:%S")
-        st.rerun()
-with c2:
-    if st.button("↩️ Ripristina originale", use_container_width=True):
-        st.session_state.grid_df = text_to_df(st.session_state.txt_base)
-        st.session_state.txt_saved = st.session_state.txt_base
-        st.session_state.last_saved_at = None
-        st.rerun()
-with c3:
-    if st.button("🧹 Reset (nuovo file)", use_container_width=True):
-        for k in ["txt_base","txt_saved","grid_df","grid_opts","ready","last_saved_at"]:
-            if k in st.session_state: del st.session_state[k]
-        st.rerun()
-with c4:
-    st.download_button(
-        "⬇️ Scarica (versione salvata)",
-        data=st.session_state.txt_saved.encode("utf-8", errors="strict"),
-        file_name="export_bolle.txt",
-        mime="text/plain",
-        use_container_width=True,
-    )
+# Aggiorna df in memoria quando Streamlit ricalcola (es. dopo Salva/Ripristina)
+if grid_resp and "data" in grid_resp:
+    new_df = pd.DataFrame(grid_resp["data"])
+    # rimuovi eventuale colonna ROW
+    if "ROW" in new_df.columns:
+        new_df = new_df.drop(columns=["ROW"])
+    # assicurati che ci siano solo 1..128 nell'ordine giusto
+    st.session_state.grid_df = new_df[CHAR_COLS].astype(str)
 
+# Footer info
 if st.session_state.last_saved_at:
     st.caption(f"Ultimo salvataggio: **{st.session_state.last_saved_at}**")
