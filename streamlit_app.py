@@ -201,74 +201,58 @@ def convert_excel_to_records(excel_bytes, cod_forn="", cod_cli_ricev=""):
 
     return records
 
-# ---------- Helper per griglie editabili (separate 01 / 02) ----------
-def split_lines_by_type(text: str, width: int = 128):
-    """Ritorna (order, headers_idx, details_idx, headers_lines, details_lines)
-       order: lista degli indici originali e tipo: [('01', idx01), ('02', idx02), ...]"""
+# ---------- Helper: unica griglia editabile ----------
+def text_to_grid_df(text: str, width: int = 128, show_dots: bool = True) -> pd.DataFrame:
+    """
+    Restituisce un DF con 130 colonne:
+    - TYPE: '01'/'02' (prime 2 colonne del TXT)
+    - ⟂   : marker visivo (█) per evidenziare testate
+    - 1..128: 1 char per cella
+    """
     lines = text.splitlines()
-    order = []
-    headers_idx, details_idx = [], []
-    headers_lines, details_lines = [], []
-    for i, line in enumerate(lines):
-        rec_type = line[:2]
-        if rec_type == "01":
-            headers_idx.append(i)
-            headers_lines.append(line[:width].ljust(width))
-            order.append(("01", i))
-        else:
-            details_idx.append(i)
-            details_lines.append(line[:width].ljust(width))
-            order.append(("02", i))
-    return order, headers_idx, details_idx, headers_lines, details_lines
-
-def df_from_lines(lines, show_dots=True):
-    rows = []
+    data = []
     for line in lines:
-        row = [("·" if (ch == " " and show_dots) else ch) for ch in line]
-        rows.append(row)
-    df = pd.DataFrame(rows, columns=[str(i) for i in range(1, 129)])
-    # mantieni lunghezza 128 sempre
+        padded = (line[:width]).ljust(width)
+        rec_type = padded[:2]
+        row = [rec_type, "██" if rec_type == "01" else ""]  # gutter scura per testate
+        for ch in padded:
+            if show_dots and ch == " ":
+                row.append("·")
+            else:
+                row.append(ch)
+        data.append(row)
+    cols = ["TYPE", "⟂"] + [str(i) for i in range(1, width + 1)]
+    df = pd.DataFrame(data, columns=cols)
+    df.index = range(1, len(df) + 1)
     return df
 
-def lines_from_df(df: pd.DataFrame, show_dots=True):
-    out = []
+def grid_df_to_text(df: pd.DataFrame, show_dots: bool = True) -> str:
+    """
+    Ricostruisce il TXT da una griglia unica (colonne: TYPE, ⟂, 1..128).
+    Conserva TYPE come primi 2 char della riga (è già presente nelle colonne 1..2).
+    """
+    out_lines = []
     for _, row in df.iterrows():
+        # ricostruisci dai char 1..128
         chars = []
-        for ch in row.tolist():
-            c = "" if ch is None else str(ch)
+        for i in range(1, 129):
+            c = "" if pd.isna(row[str(i)]) else str(row[str(i)])
             if c == "":
                 c = " "
             if show_dots and c == "·":
                 c = " "
-            c = c[0]  # solo primo carattere
+            c = c[0]  # un carattere
             chars.append(c)
-        out.append("".join(chars))
-    return out
-
-def merge_back(order, headers_idx, details_idx, headers_lines, details_lines):
-    """Ricompone nel loro ordine originale."""
-    h_map = dict(zip(headers_idx, headers_lines))
-    d_map = dict(zip(details_idx, details_lines))
-    merged = []
-    for typ, i in order:
-        merged.append(h_map[i] if typ == "01" else d_map[i])
-    return "\n".join(merged) + "\n"
+        out_lines.append("".join(chars))
+    return "\n".join(out_lines) + "\n"
 
 # ---------------- Stato ----------------
 if "txt_base" not in st.session_state:      # generato dall'Excel (originale)
     st.session_state.txt_base = ""
 if "txt_saved" not in st.session_state:     # versione SALVATA (per download)
     st.session_state.txt_saved = ""
-if "order" not in st.session_state:
-    st.session_state.order = []
-if "h_idx" not in st.session_state:
-    st.session_state.h_idx = []
-if "d_idx" not in st.session_state:
-    st.session_state.d_idx = []
-if "df_h" not in st.session_state:          # DataFrame editabile testate
-    st.session_state.df_h = pd.DataFrame()
-if "df_d" not in st.session_state:          # DataFrame editabile dettagli
-    st.session_state.df_d = pd.DataFrame()
+if "grid_df" not in st.session_state:       # griglia unica editabile
+    st.session_state.grid_df = pd.DataFrame()
 if "show_dots" not in st.session_state:
     st.session_state.show_dots = True
 if "last_saved_at" not in st.session_state:
@@ -291,37 +275,28 @@ with c3:
 b1, b2, b3 = st.columns([1,1,1])
 with b1:
     if st.button("🧹 Reset (nuovo file)", use_container_width=True, type="secondary"):
-        for k in ["txt_base", "txt_saved", "order", "h_idx", "d_idx", "df_h", "df_d", "show_dots", "last_saved_at"]:
+        for k in ["txt_base", "txt_saved", "grid_df", "show_dots", "last_saved_at"]:
             if k in st.session_state:
                 del st.session_state[k]
         st.experimental_rerun()
 with b2:
     if st.button("↩️ Ripristina TXT originale", use_container_width=True):
         if st.session_state.txt_base:
-            order, h_idx, d_idx, h_lines, d_lines = split_lines_by_type(st.session_state.txt_base, 128)
-            st.session_state.order = order
-            st.session_state.h_idx = h_idx
-            st.session_state.d_idx = d_idx
-            st.session_state.df_h = df_from_lines(h_lines, st.session_state.show_dots)
-            st.session_state.df_d = df_from_lines(d_lines, st.session_state.show_dots)
+            st.session_state.grid_df = text_to_grid_df(st.session_state.txt_base, 128, st.session_state.show_dots)
             st.toast("Anteprima riportata allo stato originale")
 with b3:
     if st.button("💾 Salva modifiche", use_container_width=True):
-        if not st.session_state.df_h.empty or not st.session_state.df_d.empty:
-            # Ricostruisci linee da entrambi gli editor
-            h_lines = lines_from_df(st.session_state.df_h, st.session_state.show_dots)
-            d_lines = lines_from_df(st.session_state.df_d, st.session_state.show_dots)
-            txt_preview = merge_back(st.session_state.order, st.session_state.h_idx, st.session_state.d_idx, h_lines, d_lines)
+        if not st.session_state.grid_df.empty:
+            txt_preview = grid_df_to_text(st.session_state.grid_df, st.session_state.show_dots)
             st.session_state.txt_saved = txt_preview
             st.session_state.last_saved_at = datetime.now().strftime("%H:%M:%S")
             st.toast("Modifiche salvate")
 
 uploaded = st.file_uploader("Carica Excel (.xlsx / .xls)", type=["xlsx", "xls"])
 
-# CSS per monospace, celle strette e sezioni
+# CSS: monospace + stringe celle; rafforza marker testate
 st.markdown("""
 <style>
-/* Monospace in editor */
 div[data-testid="stDataEditor"] table {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 12px;
@@ -330,34 +305,14 @@ div[data-testid="stDataEditor"] td, div[data-testid="stDataEditor"] th {
   white-space: pre !important;
   padding: 2px 6px !important;
 }
-
-/* Box testate più scuro */
-.section-headers {
-  background: #111827; /* grigio molto scuro */
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid #1f2937;
-  margin-bottom: 12px;
+/* colonna TYPE e ⟂ più stretta e in grassetto */
+div[data-testid="stDataEditor"] th[colindex="0"],
+div[data-testid="stDataEditor"] th[colindex="1"],
+div[data-testid="stDataEditor"] td[colindex="0"],
+div[data-testid="stDataEditor"] td[colindex="1"] {
+  font-weight: 700;
 }
-.section-headers h4{
-  color: #e5e7eb;
-}
-
-/* Box dettagli normale/chiaro */
-.section-details {
-  background: #0b0f17;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid #111827;
-}
-.section-details h4{
-  color: #e5e7eb;
-}
-
-/* intestazioni riga/colonna più compatte */
-div[data-testid="stDataEditor"] thead th {
-  padding: 4px 6px !important;
-}
+/* rendi visivamente scura la banda ⟂ quando valorizzata (usa blocchi pieni) */
 </style>
 """, unsafe_allow_html=True)
 
@@ -366,54 +321,39 @@ if uploaded:
         records = convert_excel_to_records(uploaded, cod_forn, cod_cli)
         base_txt = "\n".join(records) + "\n"
 
-        if base_txt != st.session_state.txt_base or st.session_state.df_h.empty:
+        # Inizializza alla prima lettura o se il contenuto cambia
+        if base_txt != st.session_state.txt_base or st.session_state.grid_df.empty:
             st.session_state.txt_base = base_txt
-            order, h_idx, d_idx, h_lines, d_lines = split_lines_by_type(base_txt, 128)
-            st.session_state.order = order
-            st.session_state.h_idx = h_idx
-            st.session_state.d_idx = d_idx
-            st.session_state.df_h = df_from_lines(h_lines, st.session_state.show_dots)
-            st.session_state.df_d = df_from_lines(d_lines, st.session_state.show_dots)
+            st.session_state.grid_df = text_to_grid_df(base_txt, 128, st.session_state.show_dots)
             st.session_state.txt_saved = base_txt
             st.session_state.last_saved_at = None
 
         st.success(f"OK ✅ Records generati: {len(records)}")
 
         # Se l'utente cambia la preferenza dei puntini, rigenera SOLO la vista (non i dati sottostanti)
-        st.session_state.df_h = df_from_lines(
-            lines_from_df(st.session_state.df_h, True),  # prima “leva” i puntini attuali
-            st.session_state.show_dots
-        )
-        st.session_state.df_d = df_from_lines(
-            lines_from_df(st.session_state.df_d, True),
+        st.session_state.grid_df = text_to_grid_df(
+            grid_df_to_text(st.session_state.grid_df, True),  # togli eventuali '·' precedenti
+            128,
             st.session_state.show_dots
         )
 
-        # ====== GRIGLIA TESTATE (scura) ======
-        st.markdown('<div class="section-headers"><h4>Righe TESTATA (01)</h4>', unsafe_allow_html=True)
-        edited_h = st.data_editor(
-            st.session_state.df_h,
-            key="grid_headers",
+        # ====== GRIGLIA UNICA EDITABILE ======
+        edited = st.data_editor(
+            st.session_state.grid_df,
+            key="grid_all",
             use_container_width=True,
-            num_rows="fixed",   # le testate hanno cardinalità fissa derivata dal file
+            num_rows="dynamic",   # puoi anche aggiungere/eliminare righe se serve
             disabled=False,
+            column_order=["TYPE", "⟂"] + [str(i) for i in range(1, 129)],
+            hide_index=False,
+            column_config={
+                "TYPE": st.column_config.TextColumn("TYPE", help="Prime 2 cifre della riga (01 testata, 02 dettaglio)."),
+                "⟂": st.column_config.TextColumn("⟂", help="Banda visiva: piena per le testate."),
+            }
         )
-        st.markdown('</div>', unsafe_allow_html=True)
 
-        # ====== GRIGLIA DETTAGLI (chiara) ======
-        st.markdown('<div class="section-details"><h4>Righe DETTAGLIO (02)</h4>', unsafe_allow_html=True)
-        edited_d = st.data_editor(
-            st.session_state.df_d,
-            key="grid_details",
-            use_container_width=True,
-            num_rows="dynamic",  # lasciamo libertà in più sui dettagli
-            disabled=False,
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        # Aggiorna stato con le versioni editate
-        st.session_state.df_h = edited_h
-        st.session_state.df_d = edited_d
+        # Aggiorna stato con l'editing
+        st.session_state.grid_df = edited
 
         # Info salvataggio
         if st.session_state.last_saved_at:
