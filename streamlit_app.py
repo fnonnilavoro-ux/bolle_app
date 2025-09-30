@@ -5,8 +5,8 @@ from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 # ----------------- CONFIG -----------------
-st.set_page_config(page_title="Excel → TXT (record fissi 128)", page_icon="📦", layout="wide")
-st.markdown("<h1 style='margin:0'>📦 Excel → TXT (record fissi 128)</h1>", unsafe_allow_html=True)
+st.set_page_config(page_title="📦 Excel → TXT (record fissi 128)", page_icon="📦", layout="wide")
+st.markdown("<h1 style='margin:0 0 6px 0'>📦 Excel → TXT (record fissi 128)</h1>", unsafe_allow_html=True)
 
 # ----------------- UTILS -----------------
 def strip_accents(s: str) -> str:
@@ -29,7 +29,7 @@ HDR_RE = re.compile(
     re.IGNORECASE
 )
 
-# Pulizia descrizioni con regex semplici (no mega-pattern)
+# Pulizia descrizioni con regex semplici
 PACK_TAIL_PATTERNS = [
     re.compile(r"\s*\(\s*\d+\s*(?:pz|pzs?|b)\.?\s*\)\s*$", re.IGNORECASE),
     re.compile(r"\s*-\s*\d+\s*(?:pz|pzs?|b)\.?\s*$", re.IGNORECASE),
@@ -164,7 +164,6 @@ if "last_saved_at" not in st.session_state: st.session_state.last_saved_at=None
 # ----------------- STYLES -----------------
 st.markdown("""
 <style>
-/* barra in alto fissa */
 .toolbar { position: sticky; top: 0; z-index: 10; padding: 10px 0 8px; background: var(--background-color); }
 .ag-theme-streamlit { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace; }
 .ag-theme-streamlit .ag-cell, .ag-theme-streamlit .ag-header-cell { font-size: 12px; }
@@ -176,21 +175,20 @@ st.markdown("""
 # ----------------- UPLOAD + TOOLBAR -----------------
 uploaded = st.file_uploader("Carica Excel (.xlsx/.xls)", type=["xlsx","xls"])
 
-# Toolbar: SALVA / RIPRISTINA / RESET / SCARICA (in alto)
 st.markdown('<div class="toolbar">', unsafe_allow_html=True)
 t1, t2, t3, t4 = st.columns([1,1,1,2], vertical_alignment="center")
 with t1:
     if st.button("💾 Salva modifiche", use_container_width=True):
+        # Prendi lo stato corrente della griglia (dal prossimo blocco post-render)
         st.session_state.txt_saved = df_to_text(st.session_state.grid_df) if not st.session_state.grid_df.empty else ""
         st.session_state.last_saved_at = datetime.now().strftime("%H:%M:%S")
-        st.toast("Salvato")
+        st.rerun()
 with t2:
     if st.button("↩️ Ripristina originale", use_container_width=True):
-        if st.session_state.txt_base:
-            st.session_state.grid_df = text_to_df(st.session_state.txt_base)
-            st.session_state.txt_saved = st.session_state.txt_base
-            st.session_state.last_saved_at = None
-            st.toast("Ripristinato")
+        st.session_state.grid_df = text_to_df(st.session_state.txt_base) if st.session_state.txt_base else pd.DataFrame()
+        st.session_state.txt_saved = st.session_state.txt_base
+        st.session_state.last_saved_at = None
+        st.rerun()
 with t3:
     if st.button("🧹 Reset (nuovo file)", use_container_width=True):
         for k in ["txt_base","txt_saved","grid_df","grid_opts","ready","last_saved_at"]:
@@ -214,7 +212,7 @@ if uploaded and not st.session_state.ready:
         st.session_state.txt_saved = txt
         st.session_state.grid_df   = text_to_df(txt)
         st.session_state.ready     = True
-        st.session_state.grid_opts = None  # build options una volta
+        st.session_state.grid_opts = None
         st.toast("File caricato")
     except Exception as e:
         st.error(f"Errore: {e}")
@@ -258,7 +256,7 @@ if st.session_state.grid_opts is None:
     """)
     space_formatter = JsCode("function(p){ return (p.value === ' ') ? '·' : p.value; }")
 
-    # Colonna numeri di riga (non parte dei dati)
+    # Colonna numeri di riga (UNA SOLA, non duplicarla)
     gb.configure_column(
         "ROW",
         header_name="ROW",
@@ -270,10 +268,9 @@ if st.session_state.grid_opts is None:
         gb.configure_column(c, header_name=c, width=26,
                             valueParser=one_char_parser, valueFormatter=space_formatter)
 
-    st.session_state.grid_opts = gb.build()
-
+    opts = gb.build()
     # Evidenziazione righe testata (01)
-    st.session_state.grid_opts["getRowStyle"] = JsCode("""
+    opts["getRowStyle"] = JsCode("""
         function(p){
             var c1 = p.data['1'] || ' ';
             var c2 = p.data['2'] || ' ';
@@ -284,11 +281,10 @@ if st.session_state.grid_opts is None:
         }
     """)
 
-    # Ordine colonne: ROW poi 1..128
-    defs = st.session_state.grid_opts["columnDefs"]
-    defs.append({"field":"ROW"})
+    # Ordine colonne: ROW poi 1..128 (⚠️ senza appendere di nuovo ROW → niente doppione)
     order = ["ROW"] + CHAR_COLS
-    st.session_state.grid_opts["columnDefs"] = sorted(defs, key=lambda d: order.index(d["field"]) if d["field"] in order else 999)
+    opts["columnDefs"].sort(key=lambda d: order.index(d["field"]) if d["field"] in order else 999)
+    st.session_state.grid_opts = opts
 
 # Render: NO_UPDATE → nessun rerun mentre editi
 grid_resp = AgGrid(
@@ -297,21 +293,19 @@ grid_resp = AgGrid(
     theme="streamlit",
     height=min(720, 28 * max(12, len(st.session_state.grid_df) + 3)),
     allow_unsafe_jscode=True,
-    update_mode=GridUpdateMode.NO_UPDATE,
-    data_return_mode=DataReturnMode.AS_INPUT,
+    update_mode=GridUpdateMode.NO_UPDATE,     # editing solo lato client
+    data_return_mode=DataReturnMode.AS_INPUT, # modello completo al prossimo rerun
     fit_columns_on_grid_load=False,
     reload_data=False,
 )
 
-# Aggiorna df in memoria quando Streamlit ricalcola (es. dopo Salva/Ripristina)
+# Aggiorna df SOLO quando la pagina fa un rerun (es. dopo SALVA/RIPRISTINA/RESET)
 if grid_resp and "data" in grid_resp:
     new_df = pd.DataFrame(grid_resp["data"])
-    # rimuovi eventuale colonna ROW
-    if "ROW" in new_df.columns:
+    if "ROW" in new_df.columns:  # togli colonna visuale
         new_df = new_df.drop(columns=["ROW"])
-    # assicurati che ci siano solo 1..128 nell'ordine giusto
     st.session_state.grid_df = new_df[CHAR_COLS].astype(str)
 
-# Footer info
+# Footer
 if st.session_state.last_saved_at:
     st.caption(f"Ultimo salvataggio: **{st.session_state.last_saved_at}**")
