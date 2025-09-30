@@ -26,15 +26,20 @@ def pick_col(norm_map, candidates):
         if any(real_norm.startswith(c) for c in candidates): return real_name
     return None
 
-HDR_RE = re.compile(r"(?:\*\*\s*)?Rif\.\s*Doc\.\s*di\s*trasporto\s*(\d+)\s*del\s*(\d{2}/\d{2}/\d{4})[:\s]*", re.IGNORECASE)
-PACK_TAIL = re.compile("(" + "|".join([
-    r"\s*\(\s*\d+\s*(?:pz|pzs?|b)\.?\s*\)\s*$",
-    r"\s*-\s*\d+\s*(?:pz|pzs?|b)\.?\s*$",
-    r"\s+x?\d+\s*(?:pz|pzs?|b)\.?\s*$",
-    r"\s+\d+\s*(?:pz|pzs?|b)\.?\s*$",
-    r"\s+\d+\s*$",
-    r"\s*\d+(?:pz|pzs?|b)\.?\s*$",
-]), re.IGNORECASE)
+HDR_RE = re.compile(
+    r"(?:\*\*\s*)?Rif\.\s*Doc\.\s*di\s*trasporto\s*(\d+)\s*del\s*(\d{2}/\d{2}/\d{4})[:\s]*",
+    re.IGNORECASE
+)
+
+# ❗️Stop ai pattern “joinati”: uso una lista di regex semplici applicate in serie
+PACK_TAIL_PATTERNS = [
+    re.compile(r"\s*\(\s*\d+\s*(?:pz|pzs?|b)\.?\s*\)\s*$", re.IGNORECASE),
+    re.compile(r"\s*-\s*\d+\s*(?:pz|pzs?|b)\.?\s*$", re.IGNORECASE),
+    re.compile(r"\s+x?\d+\s*(?:pz|pzs?|b)\.?\s*$", re.IGNORECASE),
+    re.compile(r"\s+\d+\s*(?:pz|pzs?|b)\.?\s*$", re.IGNORECASE),
+    re.compile(r"\s+\d+\s*$", re.IGNORECASE),
+    re.compile(r"\s*\d+(?:pz|pzs?|b)\.?\s*$", re.IGNORECASE),
+]
 
 def left_pad(v, n):  s = "" if v is None else str(v); return (s + " " * n)[:n]
 def right_pad(v, n): s = "" if v is None else str(v); return (" " * n + s)[-n:]
@@ -57,7 +62,8 @@ def clean_descr(s: str) -> str:
     prev = None
     while prev != s:
         prev = s
-        s = PACK_TAIL.sub("", s).strip()
+        for pat in PACK_TAIL_PATTERNS:
+            s = pat.sub("", s).strip()
     return s
 
 def um_from_cols(um_val, descr_val) -> str:
@@ -155,7 +161,7 @@ def df_to_text(df: pd.DataFrame) -> str:
 if "txt_base" not in st.session_state:   st.session_state.txt_base = ""
 if "txt_saved" not in st.session_state:  st.session_state.txt_saved = ""
 if "grid_df"  not in st.session_state:   st.session_state.grid_df  = pd.DataFrame()
-if "go"       not in st.session_state:   st.session_state.go = False  # mostra UI dopo upload
+if "go"       not in st.session_state:   st.session_state.go = False
 if "grid_opts" not in st.session_state:  st.session_state.grid_opts = None
 if "last_saved_at" not in st.session_state: st.session_state.last_saved_at = None
 
@@ -192,17 +198,15 @@ if uploaded and not st.session_state.go:
         st.session_state.txt_saved = txt
         st.session_state.grid_df   = text_to_df(txt)
         st.session_state.go        = True
-        st.session_state.grid_opts = None  # forza build una volta
+        st.session_state.grid_opts = None
         st.toast("File caricato")
     except Exception as e:
         st.error(f"Errore: {e}")
 
-# Se non ancora caricato, fermati qui
 if not st.session_state.go:
     st.stop()
 
 # ================== GRIGLIA (AG-Grid) ==================
-# Costruiamo le opzioni UNA SOLA VOLTA → niente reset ad ogni edit
 if st.session_state.grid_opts is None:
     df = st.session_state.grid_df
     gb = GridOptionsBuilder.from_dataframe(df)
@@ -217,7 +221,6 @@ if st.session_state.grid_opts is None:
         rowBuffer=80, domLayout="normal",
         suppressMovableColumns=True, maintainColumnOrder=True,
     )
-    # Parser di input: 1 carattere, '·' -> spazio
     one_char_parser = JsCode("""
         function(p){
             let v = p.newValue;
@@ -228,14 +231,12 @@ if st.session_state.grid_opts is None:
             return v.substring(0,1);
         }
     """)
-    # Formatter solo vista (spazi come ·)
     space_formatter = JsCode("function(p){ return (p.value === ' ') ? '·' : p.value; }")
 
     for c in CHAR_COLS:
         gb.configure_column(c, header_name=c, width=26,
                             valueParser=one_char_parser, valueFormatter=space_formatter)
 
-    # Row style: righe con "01" in testa più scure
     st.session_state.grid_opts = gb.build()
     st.session_state.grid_opts["getRowStyle"] = JsCode("""
         function(p){
@@ -248,21 +249,18 @@ if st.session_state.grid_opts is None:
         }
     """)
 
-# Render: NON ricostruiamo opzioni e NON ricreiamo df se non cambia
 grid_resp = AgGrid(
     st.session_state.grid_df,
     gridOptions=st.session_state.grid_opts,
     theme="streamlit",
     height=min(700, 28 * max(12, len(st.session_state.grid_df) + 2)),
     allow_unsafe_jscode=True,
-    update_mode=GridUpdateMode.MODEL_CHANGED,   # batch di modifiche → niente rerun continuo
-    data_return_mode=DataReturnMode.AS_INPUT,   # ritorna sempre i dati correnti del grid
+    update_mode=GridUpdateMode.MODEL_CHANGED,
+    data_return_mode=DataReturnMode.AS_INPUT,
     fit_columns_on_grid_load=False,
 )
 
-# Aggiorna df SOLO se il modello cambia (non ricreiamo nulla)
 if grid_resp and "data" in grid_resp:
-    # niente cast/append di colonne: prendiamo 1..128 precise
     new_df = pd.DataFrame(grid_resp["data"])[CHAR_COLS].astype(str)
     st.session_state.grid_df = new_df
 
